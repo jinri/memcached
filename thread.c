@@ -398,6 +398,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
             fprintf(stderr, "Can't read from libevent pipe\n");
 
     switch (buf[0]) {
+	//新连接
     case 'c':
     item = cq_pop(me->new_conn_queue);
 
@@ -428,11 +429,11 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     }
 }
 
-/* Which thread we assigned a connection to most recently. */
+/* 最近一次分发新连接的线程下标. */
 static int last_thread = -1;
 
 /*
- * Dispatches a new connection to another thread. This is only ever called
+ * 分发一个新连接给work线程， This is only ever called
  * from the main thread, either during initialization (for UDP) or because
  * of an incoming connection.
  */
@@ -447,6 +448,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
         return ;
     }
 
+    //通过轮询选取一个工作线程
     int tid = (last_thread + 1) % settings.num_threads;
 
     LIBEVENT_THREAD *thread = threads + tid;
@@ -459,10 +461,12 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
     item->read_buffer_size = read_buffer_size;
     item->transport = transport;
 
+    //将连接信息放入线程队列
     cq_push(thread->new_conn_queue, item);
 
     MEMCACHED_CONN_DISPATCH(sfd, thread->thread_id);
     buf[0] = 'c';
+	//通知线程
     if (write(thread->notify_send_fd, buf, 1) != 1) {
         perror("Writing to thread notify pipe");
     }

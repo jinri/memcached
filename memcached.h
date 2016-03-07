@@ -430,12 +430,12 @@ struct conn {
     int    sfd;
     sasl_conn_t *sasl_conn;
     bool authenticated;
-    enum conn_states  state;
+    enum conn_states  state;    /* 连接状态 */
     enum bin_substates substate;
     rel_time_t last_cmd_time;
     struct event event;
     short  ev_flags;
-    short  which;   /** which events were just triggered */
+    short  which;   /** 事件 */
 
     char   *rbuf;   /** buffer to read commands into */
     char   *rcurr;  /** but if we parsed some already, this is where we stopped */
@@ -513,7 +513,7 @@ struct conn {
     int opaque;
     int keylen;
     conn   *next;     /* Used for generating a list of conn structures */
-    LIBEVENT_THREAD *thread; /* Pointer to the thread object serving this connection */
+    LIBEVENT_THREAD *thread; /* 连接所属线程 */
 };
 
 /* array of conn structures, indexed by file descriptor */

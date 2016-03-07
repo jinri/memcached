@@ -105,12 +105,13 @@ static void conn_free(conn *c);
 struct stats stats;
 struct settings settings;
 time_t process_started;     /* when the process was started */
-conn **conns;
+conn **conns;  //连接的指针数据，初始化为max_fds大小。
 
 struct slab_rebalance slab_rebal;
 volatile int slab_rebalance_signal;
 
 /** file scope variables **/
+//监听队列，可能监听多个IP
 static conn *listen_conn = NULL;
 static int max_fds;
 static struct event_base *main_base;
@@ -301,10 +302,8 @@ static int add_msghdr(conn *c)
 extern pthread_mutex_t conn_lock;
 
 /*
- * Initializes the connections array. We don't actually allocate connection
- * structures until they're needed, so as to avoid wasting memory when the
- * maximum connection count is much higher than the actual number of
- * connections.
+ * 初始化连接数组. 为了节省内存，只初始化连接的指针数组，当有新的连接建立时，
+ * 再初始化连接数据结构。
  *
  * This does end up wasting a few pointers' worth of memory for FDs that are
  * used for things other than connections, but that's worth it in exchange for
@@ -318,7 +317,7 @@ static void conn_init(void) {
 
     max_fds = settings.maxconns + headroom + next_fd;
 
-    /* But if possible, get the actual highest FD we can possibly ever see. */
+    /* 最大文件描述符以进程可打开最大文件描述符为准(约等于最大连接数) */
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         max_fds = rl.rlim_max;
     } else {
@@ -351,6 +350,7 @@ static const char *prot_text(enum protocol prot) {
     return rv;
 }
 
+/* 将新连接加入到event_base */
 conn *conn_new(const int sfd, enum conn_states init_state,
                 const int event_flags,
                 const int read_buffer_size, enum network_transport transport,
@@ -4047,6 +4047,7 @@ static enum transmit_result transmit(conn *c) {
     }
 }
 
+//处理所有fd事件
 static void drive_machine(conn *c) {
     bool stop = false;
     int sfd;
@@ -4105,6 +4106,7 @@ static void drive_machine(conn *c) {
                 }
             }
 
+            //连接达最大值，关闭连接。
             if (settings.maxconns_fast &&
                 stats.curr_conns + stats.reserved_fds >= settings.maxconns - 1) {
                 str = "ERROR Too many open connections\r\n";
@@ -4113,6 +4115,7 @@ static void drive_machine(conn *c) {
                 STATS_LOCK();
                 stats.rejected_conns++;
                 STATS_UNLOCK();
+		    //选定一个work线程，将新连接传递给work线程。
             } else {
                 dispatch_conn_new(sfd, conn_new_cmd, EV_READ | EV_PERSIST,
                                      DATA_BUFFER_SIZE, tcp_transport);
@@ -4382,6 +4385,7 @@ static void drive_machine(conn *c) {
     return;
 }
 
+//所有tcp fd回调，在drive_machine根据fd类型处理对应事件
 void event_handler(const int fd, const short which, void *arg) {
     conn *c;
 
@@ -4600,6 +4604,7 @@ static int server_socket(const char *interface,
                 fprintf(stderr, "failed to create listening connection\n");
                 exit(EXIT_FAILURE);
             }
+			//将监听conn放入到监听队列里面
             listen_conn_add->next = listen_conn;
             listen_conn = listen_conn_add;
         }
@@ -4613,9 +4618,9 @@ static int server_socket(const char *interface,
 
 static int server_sockets(int port, enum network_transport transport,
                           FILE *portnumber_file) {
-    if (settings.inter == NULL) {
+    if (settings.inter == NULL) {  //只有一个IP
         return server_socket(settings.inter, port, transport, portnumber_file);
-    } else {
+    } else {  //存在多个IP
         // tokenize them and bind to each one of them..
         char *b;
         int ret = 0;
@@ -5678,7 +5683,7 @@ int main (int argc, char **argv) {
         perror("failed to ignore SIGPIPE; sigaction");
         exit(EX_OSERR);
     }
-    /* start up worker threads if MT mode */
+    /* 启动work线程 */
     memcached_thread_init(settings.num_threads, main_base);
 
     if (start_assoc_maintenance_thread() == -1) {
@@ -5703,7 +5708,7 @@ int main (int argc, char **argv) {
     /* initialise clock event */
     clock_handler(0, 0, 0);
 
-    /* create unix mode sockets after dropping privileges */
+    /* 初始化unix socket */
     if (settings.socketpath != NULL) {
         errno = 0;
         if (server_socket_unix(settings.socketpath,settings.access)) {
@@ -5712,7 +5717,7 @@ int main (int argc, char **argv) {
         }
     }
 
-    /* create the listening socket, bind it, and init */
+    /* 只有在socketpath为空时，才绑定tcp端口。tcp和本地只能监听一个。 */
     if (settings.socketpath == NULL) {
         const char *portnumber_filename = getenv("MEMCACHED_PORT_FILENAME");
         char temp_portnumber_filename[PATH_MAX];
