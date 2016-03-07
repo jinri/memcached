@@ -4625,6 +4625,7 @@ static int server_sockets(int port, enum network_transport transport,
             fprintf(stderr, "Failed to allocate memory for parsing server interface string\n");
             return 1;
         }
+		//循环处理多个IP
         for (char *p = strtok_r(list, ";,", &b);
              p != NULL;
              p = strtok_r(NULL, ";,", &b)) {
@@ -5158,6 +5159,7 @@ int main (int argc, char **argv) {
         NULL
     };
 
+    //检测libevent版本，1.3以上。
     if (!sanitycheck()) {
         return EX_OSERR;
     }
