@@ -304,7 +304,7 @@ struct stats {
  * Globally accessible settings as derived from the commandline.
  */
 struct settings {
-    size_t maxbytes;
+    size_t maxbytes;  //能够使用最大内存，默认64M。通过'm'参数设置。
     int maxconns;
     int port;
     int udpport;
@@ -315,8 +315,8 @@ struct settings {
     int evict_to_free;
     char *socketpath;   /* path to unix socket if using local socket */
     int access;  /* access mask (a la chmod) for unix domain socket */
-    double factor;          /* chunk size growth factor */
-    int chunk_size;
+    double factor;          /* 增长因子 */
+    int chunk_size;         /* 存储数据大小，可以通过参数'n'设置 */
     int num_threads;        /* number of worker (without dispatcher) libevent threads to run */
     int num_threads_per_udp; /* number of worker threads serving each udp socket */
     char prefix_delimiter;  /* character that marks a key prefix (for stats) */

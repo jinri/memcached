@@ -25,31 +25,32 @@
 /* powers-of-N allocation structures */
 
 typedef struct {
-    unsigned int size;      /* sizes of items */
-    unsigned int perslab;   /* how many items per slab */
+    unsigned int size;      /* slab分配tem大小 */
+    unsigned int perslab;   /* 每一个slab能分配多少个item */
 
-    void *slots;           /* list of item ptrs */
-    unsigned int sl_curr;   /* total free items in list */
+    void *slots;           /* 空闲items链表 */
+    unsigned int sl_curr;   /* 空闲items数目 */
 
-    unsigned int slabs;     /* how many slabs were allocated for this class */
+    unsigned int slabs;     /* 这个是已经分配了内存的slabs个数。list_size是这个slabs数组(slab_list)的大小  */
 
-    void **slab_list;       /* array of slab pointers */
-    unsigned int list_size; /* size of prev array */
+    void **slab_list;       /* slab数组，数组的每一个元素就是一个slab分配器，这些分配器都分配相同尺寸的内存 */
+    unsigned int list_size; /* slab数组的大小, list_size >= slabs */
 
-    size_t requested; /* The number of requested bytes */
+    size_t requested; /* 本slabclass_t分配出去的字节数 */
 } slabclass_t;
 
+//数组元素虽然有MAX_NUMBER_OF_SLAB_CLASSES个，但实际上并不是全部都使用的。
 static slabclass_t slabclass[MAX_NUMBER_OF_SLAB_CLASSES];
-static size_t mem_limit = 0;
+static size_t mem_limit = 0;  //用户设置的最大内存限制 
 static size_t mem_malloced = 0;
 /* If the memory limit has been hit once. Used as a hint to decide when to
  * early-wake the LRU maintenance thread */
 static bool mem_limit_reached = false;
-static int power_largest;
+static int power_largest;  //slabclass数组中,能分配最大item的slab下标，也是slabclass已经使用了的元素个数.
 
-static void *mem_base = NULL;
-static void *mem_current = NULL;
-static size_t mem_avail = 0;
+static void *mem_base = NULL;    //预分配内存起始地址
+static void *mem_current = NULL; //还可以使用内存开始地址
+static size_t mem_avail = 0;     //还可以使用内存字节长度
 
 /**
  * Access to the slab allocator is protected by this lock
@@ -75,6 +76,7 @@ static void slabs_preallocate (const unsigned int maxslabs);
 /*
  * Figures out which slab class (chunk size) is required to store an item of
  * a given size.
+ * 根据size大小找出合适的slab分配器
  *
  * Given object size, return id to use when allocating/freeing memory for object
  * 0 means error: can't store such a large object
@@ -85,7 +87,7 @@ unsigned int slabs_clsid(const size_t size) {
 
     if (size == 0)
         return 0;
-    while (size > slabclass[res].size)
+    while (size > slabclass[res].size)  //找到第一个大于size的slab分配器
         if (res++ == power_largest)     /* won't fit in the biggest slab */
             return 0;
     return res;
@@ -94,13 +96,23 @@ unsigned int slabs_clsid(const size_t size) {
 /**
  * Determines the chunk sizes and initializes the slab class descriptors
  * accordingly.
+ * limit 用户设置的最大内存限制
+ * factor 扩容因子，默认1.25
+ *
+ * prealloc 如果OS允许的话，那么向OS申请更大的内存页。
+ * OS的默认内存页为4KB。大的内存页可以有效降低页表的大小，提高效率。
+ * 此选项会使得memcached预先先OS全部所需的申请内存。当然这些内存尽量是用大内存页分配的。
  */
 void slabs_init(const size_t limit, const double factor, const bool prealloc) {
     int i = POWER_SMALLEST - 1;
+	//size由两部分组成: item结构体本身 和 这个item对应的数据
+	//这里的数据也就是set、add命令中的那个数据.后面的循环可以看到这个size变量会
+	//根据扩容因子factor慢慢扩大，所以能存储的数据长度也会变大的
     unsigned int size = sizeof(item) + settings.chunk_size;
 
-    mem_limit = limit;
+    mem_limit = limit;  //最大内存限制
 
+    //用户要求预分配好内存
     if (prealloc) {
         /* Allocate everything in a big chunk with malloc */
         mem_base = malloc(mem_limit);
@@ -115,14 +127,17 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
 
     memset(slabclass, 0, sizeof(slabclass));
 
+    //slab分配器分配能力按factor增加
     while (++i < MAX_NUMBER_OF_SLAB_CLASSES-1 && size <= settings.item_size_max / factor) {
-        /* Make sure items are always n-byte aligned */
+        /* 确保items 8字节对齐 */
         if (size % CHUNK_ALIGN_BYTES)
             size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
 
+        //这个slabclass的slab分配器能分配的item大小
         slabclass[i].size = size;
+		//这个slabclass的slab分配器最多能分配多少个item(也决定了最多分配多少内存)
         slabclass[i].perslab = settings.item_size_max / slabclass[i].size;
-        size *= factor;
+        size *= factor;  //将下一个slab分配器能分配大小扩容
         if (settings.verbose > 1) {
             fprintf(stderr, "slab class %3d: chunk size %9u perslab %7u\n",
                     i, slabclass[i].size, slabclass[i].perslab);
@@ -151,6 +166,8 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
     }
 }
 
+
+//为slabclass数组的每一个元素(使用到的元素)分配内存  
 static void slabs_preallocate (const unsigned int maxslabs) {
     int i;
     unsigned int prealloc = 0;
@@ -174,8 +191,10 @@ static void slabs_preallocate (const unsigned int maxslabs) {
 
 }
 
+//增加list_size数组大小
 static int grow_slab_list (const unsigned int id) {
     slabclass_t *p = &slabclass[id];
+	//slab_list中没有元素或用完了之前申请的所有元素
     if (p->slabs == p->list_size) {
         size_t new_size =  (p->list_size != 0) ? p->list_size * 2 : 16;
         void *new_list = realloc(p->slab_list, new_size * sizeof(void *));
@@ -186,6 +205,7 @@ static int grow_slab_list (const unsigned int id) {
     return 1;
 }
 
+//将ptr切割成item大小放入slabclass[id]的空闲链表中
 static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
     slabclass_t *p = &slabclass[id];
     int x;
@@ -206,6 +226,7 @@ static void *get_page_from_global_pool(void) {
     return ret;
 }
 
+//申请或扩大slabclass[id]空闲链表大小
 static int do_slabs_newslab(const unsigned int id) {
     slabclass_t *p = &slabclass[id];
     slabclass_t *g = &slabclass[SLAB_GLOBAL_PAGE_POOL];
@@ -215,13 +236,13 @@ static int do_slabs_newslab(const unsigned int id) {
 
     if ((mem_limit && mem_malloced + len > mem_limit && p->slabs > 0
          && g->slabs == 0)) {
-        mem_limit_reached = true;
+        mem_limit_reached = true;  //已达最大内存限制
         MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
         return 0;
     }
 
-    if ((grow_slab_list(id) == 0) ||
-        (((ptr = get_page_from_global_pool()) == NULL) &&
+    if ((grow_slab_list(id) == 0) ||  //slab_list直接向系统申请，不受内存('m'参数设置)大小限制
+        (((ptr = get_page_from_global_pool()) == NULL) &&  //ptr为item数据内存，受内存大小限制('m'参数设置)
         ((ptr = memory_allocate((size_t)len)) == 0))) {
 
         MEMCACHED_SLABS_SLABCLASS_ALLOCATE_FAILED(id);
@@ -237,7 +258,11 @@ static int do_slabs_newslab(const unsigned int id) {
     return 1;
 }
 
-/*@null@*/
+//向slabclass申请一个item。在调用该函数之前，已经调用slabs_clsid函数确定  
+//本次申请是向哪个slabclass_t申请item了，参数id就是指明是向哪个slabclass_t  
+//申请item。如果该slabclass_t是有空闲item，那么就从空闲的item队列中分配一个  
+//如果没有空闲item，那么就申请一个内存页。再从新申请的页中分配一个item  
+//返回值为得到的item，如果没有内存了，返回NULL  
 static void *do_slabs_alloc(const size_t size, unsigned int id, unsigned int *total_chunks,
         unsigned int flags) {
     slabclass_t *p;
@@ -256,12 +281,13 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, unsigned int *to
     }
     /* fail unless we have space at the end of a recently allocated page,
        we have something on our freelist, or we could allocate a new page */
+    /* slabclass_t没有空闲的item了，增加空闲item */
     if (p->sl_curr == 0 && flags != SLABS_ALLOC_NO_NEWPAGE) {
         do_slabs_newslab(id);
     }
 
     if (p->sl_curr != 0) {
-        /* return off our freelist */
+        /* 返回空闲链表第一个元素 */
         it = (item *)p->slots;
         p->slots = it->next;
         if (it->next) it->next->prev = 0;
@@ -276,7 +302,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, unsigned int *to
     }
 
     if (ret) {
-        p->requested += size;
+        p->requested += size;  //增加本slabclass分配出去的字节数
         MEMCACHED_SLABS_ALLOCATE(size, id, p->size, ret);
     } else {
         MEMCACHED_SLABS_ALLOCATE_FAILED(size, id);
@@ -285,6 +311,7 @@ static void *do_slabs_alloc(const size_t size, unsigned int id, unsigned int *to
     return ret;
 }
 
+//将ptr指向的内存放入到slabclass[id]的空闲链表中
 static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     slabclass_t *p;
     item *it;
@@ -297,6 +324,7 @@ static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     p = &slabclass[id];
 
     it = (item *)ptr;
+	//为item的it_flags添加ITEM_SLABBED属性，标明这个item是在slab中没有被分配出去 
     it->it_flags = ITEM_SLABBED;
     it->slabs_clsid = 0;
     it->prev = 0;
@@ -305,7 +333,7 @@ static void do_slabs_free(void *ptr, const size_t size, unsigned int id) {
     p->slots = it;
 
     p->sl_curr++;
-    p->requested -= size;
+    p->requested -= size;  //减少本slabclass分配出去的字节数
     return;
 }
 
@@ -404,12 +432,14 @@ static void do_slabs_stats(ADD_STAT add_stats, void *c) {
     add_stats(NULL, 0, NULL, 0, c);
 }
 
+//分配size字节内存。
 static void *memory_allocate(size_t size) {
     void *ret;
 
     if (mem_base == NULL) {
-        /* We are not using a preallocated large memory chunk */
+        /* 没有预先分配大块内存，直接申请。 */
         ret = malloc(size);
+	//已经申请过大块内存，从大块内存中申请。
     } else {
         ret = mem_current;
 
@@ -417,7 +447,7 @@ static void *memory_allocate(size_t size) {
             return NULL;
         }
 
-        /* mem_current pointer _must_ be aligned!!! */
+        /* 确保内存8字节对齐 */
         if (size % CHUNK_ALIGN_BYTES) {
             size += CHUNK_ALIGN_BYTES - (size % CHUNK_ALIGN_BYTES);
         }
