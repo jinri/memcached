@@ -56,11 +56,11 @@ typedef struct {
     bool run_complete;
 } crawlerstats_t;
 
-static item *heads[LARGEST_ID];
-static item *tails[LARGEST_ID];
+static item *heads[LARGEST_ID];  //LRU队头(平行数组)
+static item *tails[LARGEST_ID];  //LRU队尾
 static crawler crawlers[LARGEST_ID];
 static itemstats_t itemstats[LARGEST_ID];
-static unsigned int sizes[LARGEST_ID];
+static unsigned int sizes[LARGEST_ID];  //每一个LRU队列长度
 static crawlerstats_t crawlerstats[MAX_NUMBER_OF_SLAB_CLASSES];
 
 static int crawler_count = 0;
@@ -151,6 +151,9 @@ static size_t item_make_header(const uint8_t nkey, const int flags, const int nb
     return sizeof(item) + nkey + *nsuffix + nbytes;
 }
 
+//key、flags、exptime三个参数是用户在使用set、add命令存储一条数据时输入的参数。  
+//nkey是key字符串的长度。nbytes则是用户要存储的data长度+2,因为在data的结尾处还要加上"\r\n"  
+//cur_hv则是根据键值key计算得到的哈希值。 
 item *do_item_alloc(char *key, const size_t nkey, const int flags,
                     const rel_time_t exptime, const int nbytes,
                     const uint32_t cur_hv) {
@@ -159,13 +162,16 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags,
     item *it = NULL;
     char suffix[40];
     unsigned int total_chunks;
+	//要存储这个item需要的总空间。要注意第一个参数是nkey+1，所以上面的那些宏计算时  
+    //使用了(item)->nkey + 1 
     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
     if (settings.use_cas) {
         ntotal += sizeof(uint64_t);
     }
 
+    //根据大小判断从属于哪个slab
     unsigned int id = slabs_clsid(ntotal);
-    if (id == 0)
+    if (id == 0)  //不属于任何一个slab
         return 0;
 
     /* If no memory is available, attempt a direct LRU juggle/eviction */
@@ -270,6 +276,7 @@ bool item_size_ok(const size_t nkey, const int flags, const int nbytes) {
     return slabs_clsid(ntotal) != 0;
 }
 
+//插入到队列头
 static void do_item_link_q(item *it) { /* item is the new head */
     item **head, **tail;
     assert((it->it_flags & ITEM_SLABBED) == 0);
@@ -287,12 +294,14 @@ static void do_item_link_q(item *it) { /* item is the new head */
     return;
 }
 
+//将item插入到LRU队列的头部
 static void item_link_q(item *it) {
     pthread_mutex_lock(&lru_locks[it->slabs_clsid]);
     do_item_link_q(it);
     pthread_mutex_unlock(&lru_locks[it->slabs_clsid]);
 }
 
+//从队列中删除节点
 static void do_item_unlink_q(item *it) {
     item **head, **tail;
     head = &heads[it->slabs_clsid];
@@ -315,15 +324,17 @@ static void do_item_unlink_q(item *it) {
     return;
 }
 
+//将it从对应的LRU队列中删除
 static void item_unlink_q(item *it) {
     pthread_mutex_lock(&lru_locks[it->slabs_clsid]);
     do_item_unlink_q(it);
     pthread_mutex_unlock(&lru_locks[it->slabs_clsid]);
 }
 
+//将item插入到哈希表和LRU队列
 int do_item_link(item *it, const uint32_t hv) {
     MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
-    assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
+    assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);  //确保被分配但还没有插入
     it->it_flags |= ITEM_LINKED;
     it->time = current_time;
 
@@ -335,13 +346,14 @@ int do_item_link(item *it, const uint32_t hv) {
 
     /* Allocate a new CAS ID on link. */
     ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
-    assoc_insert(it, hv);
-    item_link_q(it);
+    assoc_insert(it, hv);  //插入到哈希表
+    item_link_q(it);       //插入到LRU队列
     refcount_incr(&it->refcount);
 
     return 1;
 }
 
+//将item从哈希表和LRU队列中删除，并向对应的slab归还item
 void do_item_unlink(item *it, const uint32_t hv) {
     MEMCACHED_ITEM_UNLINK(ITEM_key(it), it->nkey, it->nbytes);
     if ((it->it_flags & ITEM_LINKED) != 0) {
@@ -350,9 +362,9 @@ void do_item_unlink(item *it, const uint32_t hv) {
         stats.curr_bytes -= ITEM_ntotal(it);
         stats.curr_items -= 1;
         STATS_UNLOCK();
-        assoc_delete(ITEM_key(it), it->nkey, hv);
-        item_unlink_q(it);
-        do_item_remove(it);
+        assoc_delete(ITEM_key(it), it->nkey, hv);  //从哈希表中删除
+        item_unlink_q(it);  //从LRU中删除
+        do_item_remove(it);  //归还给对应item
     }
 }
 
@@ -371,18 +383,20 @@ void do_item_unlink_nolock(item *it, const uint32_t hv) {
     }
 }
 
+//减少item引用计数，并归还给slab
 void do_item_remove(item *it) {
     MEMCACHED_ITEM_REMOVE(ITEM_key(it), it->nkey, it->nbytes);
     assert((it->it_flags & ITEM_SLABBED) == 0);
     assert(it->refcount > 0);
 
     if (refcount_decr(&it->refcount) == 0) {
-        item_free(it);
+        item_free(it);  //引用计数为0，归还item
     }
 }
 
 /* Copy/paste to avoid adding two extra branches for all common calls, since
  * _nolock is only used in an uncommon case where we want to relink. */
+ /* 更新item访问时间，并放入到LRU头 (不加锁版) */
 void do_item_update_nolock(item *it) {
     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
@@ -396,17 +410,18 @@ void do_item_update_nolock(item *it) {
     }
 }
 
-/* Bump the last accessed time, or relink if we're in compat mode */
+/* 更新item访问时间，并放入到LRU头 (加锁版) */
 void do_item_update(item *it) {
     MEMCACHED_ITEM_UPDATE(ITEM_key(it), it->nkey, it->nbytes);
+	//上次更新时间大于ITEM_UPDATE_INTERVAL才更新
     if (it->time < current_time - ITEM_UPDATE_INTERVAL) {
         assert((it->it_flags & ITEM_SLABBED) == 0);
 
         if ((it->it_flags & ITEM_LINKED) != 0) {
-            it->time = current_time;
+            it->time = current_time;  //更新访问时间
             if (!settings.lru_maintainer_thread) {
-                item_unlink_q(it);
-                item_link_q(it);
+                item_unlink_q(it);  //从LRU中删除
+                item_link_q(it);    //插入到LRU头
             }
         }
     }

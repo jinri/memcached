@@ -60,7 +60,7 @@
 #define MIN_BIN_PKT_LENGTH 16
 #define BIN_PKT_HDR_WORDS (MIN_BIN_PKT_LENGTH/sizeof(uint32_t))
 
-/* Initial power multiplier for the hash table */
+/* 哈希表默认大小，2的次幂 */
 #define HASHPOWER_DEFAULT 16
 
 /*
@@ -333,7 +333,7 @@ struct settings {
     bool lru_maintainer_thread; /* LRU maintainer background thread */
     bool slab_reassign;     /* Whether or not slab reassignment is allowed */
     int slab_automove;     /* Whether or not to automatically move slabs */
-    int hashpower_init;     /* Starting hash power level */
+    int hashpower_init;     /* 哈希表大小，通过HASHPOWER_INIT指定 */
     bool shutdown_command; /* allow shutdown command */
     int tail_repair_time;   /* LRU tail refcount leak repair time */
     bool flush_enabled;     /* flush_all enabled */
@@ -365,25 +365,25 @@ extern struct settings settings;
  * Structure for storing items within memcached.
  */
 typedef struct _stritem {
-    /* Protected by LRU locks */
+    /* 用于LRU队列 Protected by LRU locks */
     struct _stritem *next;
     struct _stritem *prev;
     /* Rest are protected by an item lock */
-    struct _stritem *h_next;    /* hash chain next */
-    rel_time_t      time;       /* least recent access */
-    rel_time_t      exptime;    /* expire time */
-    int             nbytes;     /* size of data */
-    unsigned short  refcount;
-    uint8_t         nsuffix;    /* length of flags-and-length string */
-    uint8_t         it_flags;   /* ITEM_* above */
-    uint8_t         slabs_clsid;/* which slab class we're in */
+    struct _stritem *h_next;    /* 用于哈希表冲突链 */
+    rel_time_t      time;       /* 最后一次访问时间 */
+    rel_time_t      exptime;    /* 过期时间 */
+    int             nbytes;     /* 存放数据长度 */
+    unsigned short  refcount;   /* item引用次数 */
+    uint8_t         nsuffix;    /* 后缀长度 length of flags-and-length string */
+    uint8_t         it_flags;   /* item属性 ITEM_* above */
+    uint8_t         slabs_clsid;/* which slab class we're in. slab分配器ID用来标识属于哪个slab分配器 */
     uint8_t         nkey;       /* key length, w/terminating null and padding */
     /* this odd type prevents type-punning issues when we do
      * the little shuffle to save space when not using CAS. */
     union {
         uint64_t cas;
         char end;
-    } data[];
+    } data[];  //数据
     /* if it_flags & ITEM_CAS we have 8 bytes CAS */
     /* then null-terminated key */
     /* then " flags length\r\n" (no terminating null) */

@@ -5671,7 +5671,7 @@ int main (int argc, char **argv) {
 
     /* initialize other stuff */
     stats_init();
-    assoc_init(settings.hashpower_init);
+    assoc_init(settings.hashpower_init);  //初始化哈希表
     conn_init();
     slabs_init(settings.maxbytes, settings.factor, preallocate);
 
@@ -5686,6 +5686,7 @@ int main (int argc, char **argv) {
     /* 启动work线程 */
     memcached_thread_init(settings.num_threads, main_base);
 
+    //哈希表扩容线程
     if (start_assoc_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
     }

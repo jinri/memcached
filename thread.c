@@ -35,7 +35,7 @@ struct conn_queue {
     pthread_mutex_t lock;  //队列锁
 };
 
-/* Locks for cache LRU operations */
+/* LRU队列所有，与Items.c:59 static item *heads[LARGEST_ID];对应 */
 pthread_mutex_t lru_locks[POWER_LARGEST];
 
 /* Connection lock around accepting new connections */
