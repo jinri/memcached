@@ -58,12 +58,12 @@ typedef struct {
 
 static item *heads[LARGEST_ID];  //LRU队头(平行数组)
 static item *tails[LARGEST_ID];  //LRU队尾
-static crawler crawlers[LARGEST_ID];
+static crawler crawlers[LARGEST_ID];  //LRU伪item数组，每个LRU队列一个，记录在爬LRU队列时的位置。
 static itemstats_t itemstats[LARGEST_ID];
 static unsigned int sizes[LARGEST_ID];  //每一个LRU队列长度
 static crawlerstats_t crawlerstats[MAX_NUMBER_OF_SLAB_CLASSES];
 
-static int crawler_count = 0;
+static int crawler_count = 0;  //本次任务要处理多少个LRU队列
 static volatile int do_run_lru_crawler_thread = 0;
 static volatile int do_run_lru_maintainer_thread = 0;
 static int lru_crawler_initialized = 0;
@@ -98,6 +98,13 @@ uint64_t get_cas_id(void) {
     return next_id;
 }
 
+//settings.oldest_live初始化值为0  
+//检测用户是否使用过flush_all命令，删除所有item。  
+//it->time <= settings.oldest_live就说明用户在使用flush_all命令的时候  
+//就已经存在该item了。那么该item是要删除的。  
+//flush_all命令可以有参数，用来设定在未来的某个时刻把所有的item都设置  
+//为过期失效，此时settings.oldest_live是一个比worker接收到flush_all  
+//命令的那一刻大的时间,所以要判断settings.oldest_live <= current_time  
 int item_is_flushed(item *it) {
     rel_time_t oldest_live = settings.oldest_live;
     uint64_t cas = ITEM_get_cas(it);
@@ -714,6 +721,7 @@ item *do_item_get(const char *key, const size_t nkey, const uint32_t hv) {
     }
 
     if (it != NULL) {
+		//检测该item是否被flush过。
         if (item_is_flushed(it)) {
             do_item_unlink(it, hv);
             do_item_remove(it);
@@ -721,6 +729,7 @@ item *do_item_get(const char *key, const size_t nkey, const uint32_t hv) {
             if (was_found) {
                 fprintf(stderr, " -nuked by flush");
             }
+		//惰性删除，该item已经过期失效了。
         } else if (it->exptime != 0 && it->exptime <= current_time) {
             do_item_unlink(it, hv);
             do_item_remove(it);
@@ -791,6 +800,9 @@ static int lru_pull_tail(const int orig_id, const int cur_lru,
              * Can still unlink the item, but it won't be reusable yet */
             itemstats[id].lrutail_reflocked++;
             /* In case of refcount leaks, enable for quick workaround. */
+			/* item的访问时间加上settings.tail_repair_time时间小于当前时间，
+			 * 则认为该item发生了引用计数泄露，将引用计数置为1，并释放掉。
+			 */
             /* WARNING: This can cause terrible corruption */
             if (settings.tail_repair_time &&
                     search->time + settings.tail_repair_time < current_time) {
@@ -803,7 +815,7 @@ static int lru_pull_tail(const int orig_id, const int cur_lru,
             }
         }
 
-        /* Expired or flushed */
+        /* item过期或被flush */
         if ((search->exptime != 0 && search->exptime < current_time)
             || item_is_flushed(search)) {
             itemstats[id].reclaimed++;
@@ -1150,6 +1162,7 @@ static void crawler_unlink_q(item *it) {
 
 /* This is too convoluted, but it's a difficult shuffle. Try to rewrite it
  * more clearly. */
+//返回crawlers[i]的前驱节点,并交换crawlers[i]和前驱节点的位置
 static item *crawler_crawl_q(item *it) {
     item **head, **tail;
     assert(it->it_flags == 1);
@@ -1157,7 +1170,7 @@ static item *crawler_crawl_q(item *it) {
     head = &heads[it->slabs_clsid];
     tail = &tails[it->slabs_clsid];
 
-    /* We've hit the head, pop off */
+    /* it节点为头结点，遍历完成。 */
     if (it->prev == 0) {
         assert(*head == it);
         if (it->next) {
@@ -1247,6 +1260,7 @@ static void item_crawler_evaluate(item *search, uint32_t hv, int i) {
     }
 }
 
+/* LRU爬虫线程函数 */
 static void *item_crawler_thread(void *arg) {
     int i;
     int crawls_persleep = settings.crawls_persleep;
@@ -1269,13 +1283,16 @@ static void *item_crawler_thread(void *arg) {
             }
             pthread_mutex_lock(&lru_locks[i]);
             search = crawler_crawl_q((item *)&crawlers[i]);
+			//crawlers[i]是头节点，没有前驱节点  
+            //remaining的值为settings.lru_crawler_tocrawl。每次启动lru  
+            //爬虫线程，检查每一个lru队列的多少个item。
             if (search == NULL ||
                 (crawlers[i].remaining && --crawlers[i].remaining < 1)) {
                 if (settings.verbose > 2)
                     fprintf(stderr, "Nothing left to crawl for %d\n", i);
                 crawlers[i].it_flags = 0;
-                crawler_count--;
-                crawler_unlink_q((item *)&crawlers[i]);
+                crawler_count--;  //清理完一个LRU队列,任务数减一 
+                crawler_unlink_q((item *)&crawlers[i]);  //将这个伪item从LRU队列中删除
                 pthread_mutex_unlock(&lru_locks[i]);
                 pthread_mutex_lock(&lru_crawler_stats_lock);
                 crawlerstats[CLEAR_LRU(i)].end_time = current_time;
@@ -1287,6 +1304,7 @@ static void *item_crawler_thread(void *arg) {
             /* Attempt to hash item lock the "search" item. If locked, no
              * other callers can incr the refcount
              */
+             //尝试锁住控制这个item的哈希表段级别锁
             if ((hold_lock = item_trylock(hv)) == NULL) {
                 pthread_mutex_unlock(&lru_locks[i]);
                 continue;
@@ -1304,13 +1322,15 @@ static void *item_crawler_thread(void *arg) {
             /* Interface for this could improve: do the free/decr here
              * instead? */
             pthread_mutex_lock(&lru_crawler_stats_lock);
-            item_crawler_evaluate(search, hv, i);
+            item_crawler_evaluate(search, hv, i);  //如果这个item过期失效了，那么就删除这个item 
             pthread_mutex_unlock(&lru_crawler_stats_lock);
 
             if (hold_lock)
                 item_trylock_unlock(hold_lock);
             pthread_mutex_unlock(&lru_locks[i]);
 
+            //lru爬虫不能不间断地爬lru队列，这样会妨碍worker线程的正常业务  
+            //所以需要挂起lru爬虫线程一段时间。在默认设置中，会休眠100微秒 
             if (crawls_persleep <= 0 && settings.lru_crawler_sleep) {
                 usleep(settings.lru_crawler_sleep);
                 crawls_persleep = settings.crawls_persleep;
@@ -1357,9 +1377,15 @@ int stop_item_crawler_thread(void) {
  * caller immediately releases lock.
  * thread is now safely waiting on condition before the caller returns.
  */
+ /* 创建LRU爬虫线程 */
+//worker线程接收到"lru_crawler enable"命令后会调用本函数
+//启动memcached时如果有-o lru_crawler参数也是会调用本函数
 int start_item_crawler_thread(void) {
     int ret;
 
+    //在stop_item_crawler_thread函数可以看到pthread_join函数  
+    //在pthread_join返回后，才会把settings.lru_crawler设置为false。  
+    //所以不会出现同时出现两个crawler线程
     if (settings.lru_crawler)
         return -1;
     pthread_mutex_lock(&lru_crawler_lock);
@@ -1378,8 +1404,7 @@ int start_item_crawler_thread(void) {
     return 0;
 }
 
-/* 'remaining' is passed in so the LRU maintainer thread can scrub the whole
- * LRU every time.
+/* 向对应的LRU队列中插入伪item，插入到队列尾部。
  */
 static int do_lru_crawler_start(uint32_t id, uint32_t remaining) {
     int i;
@@ -1446,17 +1471,21 @@ enum crawler_result_type lru_crawler_crawl(char *slabs) {
     uint32_t sid = 0;
     int starts = 0;
     uint8_t tocrawl[MAX_NUMBER_OF_SLAB_CLASSES];
+	//LRU爬虫线程进行清理的时候，会锁上lru_crawler_lock。直到完成所有  
+    //的清理任务才会解锁。所以客户端的前一个清理任务还没结束前，不能  
+    //再提交另外一个清理任务     
     if (pthread_mutex_trylock(&lru_crawler_lock) != 0) {
         return CRAWLER_RUNNING;
     }
 
-    /* FIXME: I added this while debugging. Don't think it's needed? */
+    //解析命令，如果命令要求对某一个LRU队列进行清理，那么就在tocrawl数组  
+    //对应元素赋值1作为标志  
     memset(tocrawl, 0, sizeof(uint8_t) * MAX_NUMBER_OF_SLAB_CLASSES);
-    if (strcmp(slabs, "all") == 0) {
+    if (strcmp(slabs, "all") == 0) {  //全部LRU队列
         for (sid = 0; sid < MAX_NUMBER_OF_SLAB_CLASSES; sid++) {
             tocrawl[sid] = 1;
         }
-    } else {
+    } else {  //指定LRU队列
         for (char *p = strtok_r(slabs, ",", &b);
              p != NULL;
              p = strtok_r(NULL, ",", &b)) {
@@ -1474,6 +1503,7 @@ enum crawler_result_type lru_crawler_crawl(char *slabs) {
         if (tocrawl[sid])
             starts += do_lru_crawler_start(sid, settings.lru_crawler_tocrawl);
     }
+	//有任务了，唤醒LRU爬虫线程，让其执行清理任务
     if (starts) {
         pthread_cond_signal(&lru_crawler_cond);
         pthread_mutex_unlock(&lru_crawler_lock);

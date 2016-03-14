@@ -5176,7 +5176,7 @@ int main (int argc, char **argv) {
     /* init settings */
     settings_init();
 
-    /* Run regardless of initializing it later */
+    /* 初始化LRU线程相关变量 */
     init_lru_crawler();
     init_lru_maintainer();
 
@@ -5691,6 +5691,7 @@ int main (int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    //启动LRU爬虫线程
     if (start_lru_crawler && start_item_crawler_thread() != 0) {
         fprintf(stderr, "Failed to enable LRU crawler thread\n");
         exit(EXIT_FAILURE);

@@ -55,10 +55,11 @@ static pthread_mutex_t worker_hang_lock;
 static CQ_ITEM *cqi_freelist;
 static pthread_mutex_t cqi_freelist_lock;
 
+//指向段锁数组的指针，多个桶对应一个item锁。
 static pthread_mutex_t *item_locks;
-/* size of the item lock hash table */
+//段锁的数量
 static uint32_t item_lock_count;
-unsigned int item_lock_hashpower;
+unsigned int item_lock_hashpower;  //item_lock_count = hashsize(item_lock_hashpower);
 #define hashsize(n) ((unsigned long int)1<<(n))
 #define hashmask(n) (hashsize(n)-1)
 
@@ -743,7 +744,7 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
     pthread_mutex_init(&cqi_freelist_lock, NULL);
     cqi_freelist = NULL;
 
-    /* Want a wide lock table, but don't waste memory */
+    /* 根据work线程数目，确定段级别锁数目，2的次幂。 */
     if (nthreads < 3) {
         power = 10;
     } else if (nthreads < 4) {
@@ -765,6 +766,8 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
     item_lock_count = hashsize(power);
     item_lock_hashpower = power;
 
+    //初始化段级别锁
+    //哈希表中段级别的锁。并不是一个桶就对应有一个锁。而是多个桶共用一个锁
     item_locks = calloc(item_lock_count, sizeof(pthread_mutex_t));
     if (! item_locks) {
         perror("Can't allocate item locks");
