@@ -1,3 +1,5 @@
 问题：
-1、listen fd只accept一次，并没有多次accept，如果同时存在多个连接，如何处理？
-2、slab分配器同一大小内存为什么需要多个？
+2、客户端心跳包处理？
+3、slab分配器同一大小内存为什么需要多个？
+4、set get del item引用计数的变化？
+5、do_item_alloc 实现

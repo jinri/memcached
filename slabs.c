@@ -230,6 +230,12 @@ static void *get_page_from_global_pool(void) {
 static int do_slabs_newslab(const unsigned int id) {
     slabclass_t *p = &slabclass[id];
     slabclass_t *g = &slabclass[SLAB_GLOBAL_PAGE_POOL];
+	//当settings.slab_reassign为true，也就是启动rebalance功能的时候，slabclass数组中所有slabclass_t的内存页都是一样大的，
+	//等于settings.item_size_max(默认为1MB)。
+	//这样做的好处就是在需要将一个内存页从某一个slabclass_t强抢给另外一个slabclass_t时，
+	//比较好处理。不然的话，slabclass[i]从slabclass[j] 抢到的一个内存页可以切分为n个item，
+	//而从slabclass[k]抢到的一个内存页却切分为m个item，而本身的一个内存页有s个item。
+	//这样的话是相当混乱的。假如毕竟统一了内存页大小，那么无论从哪里抢到的内存页都是切分成一样多的item个数。
     int len = settings.slab_reassign ? settings.item_size_max
         : p->size * p->perslab;
     char *ptr;
@@ -525,6 +531,7 @@ static volatile int do_run_slab_rebalance_thread = 1;
 #define DEFAULT_SLAB_BULK_CHECK 1
 int slab_bulk_check = DEFAULT_SLAB_BULK_CHECK;
 
+//开始重新分配内存页大小
 static int slab_rebalance_start(void) {
     slabclass_t *s_cls;
     int no_go = 0;
@@ -544,7 +551,7 @@ static int slab_rebalance_start(void) {
         no_go = -1;
     }
 
-    if (s_cls->slabs < 2)
+    if (s_cls->slabs < 2)  //目标slab class页数太少了，无法分一个页给别人 
         no_go = -3;
 
     if (no_go != 0) {
@@ -555,6 +562,8 @@ static int slab_rebalance_start(void) {
     /* Always kill the first available slab page as it is most likely to
      * contain the oldest items
      */
+    //记录要移动的页的信息。slab_start指向页的开始位置。slab_end指向页  
+    //的结束位置。slab_pos则记录当前处理的位置(item)  
     slab_rebal.slab_start = s_cls->slab_list[0];
     slab_rebal.slab_end   = (char *)slab_rebal.slab_start +
         (s_cls->size * s_cls->perslab);
@@ -562,7 +571,7 @@ static int slab_rebalance_start(void) {
     slab_rebal.done       = 0;
 
     /* Also tells do_item_get to search for items in this slab */
-    slab_rebalance_signal = 2;
+    slab_rebalance_signal = 2;  //要rebalance线程接下来进行内存页移动
 
     if (settings.verbose > 1) {
         fprintf(stderr, "Started a slab rebalance\n");
@@ -864,6 +873,7 @@ static void slab_rebalance_finish(void) {
 
 /* Slab mover thread.
  * Sits waiting for a condition to jump off and shovel some memory about
+ * 内存页重分配任务
  */
 static void *slab_rebalance_thread(void *arg) {
     int was_busy = 0;
@@ -879,15 +889,15 @@ static void *slab_rebalance_thread(void *arg) {
 
             was_busy = 0;
         } else if (slab_rebalance_signal && slab_rebal.slab_start != NULL) {
-            was_busy = slab_rebalance_move();
+            was_busy = slab_rebalance_move();  //进行内存页迁移操作
         }
 
-        if (slab_rebal.done) {
+        if (slab_rebal.done) {  //完成内存页重分配操作
             slab_rebalance_finish();
-        } else if (was_busy) {
+        } else if (was_busy) {  //有worker线程在使用内存页上的item
             /* Stuck waiting for some items to unlock, so slow down a bit
              * to give them a chance to free up */
-            usleep(50);
+            usleep(50);  //休眠一会儿，等待worker线程放弃使用item，然后再次尝试
         }
 
         if (slab_rebalance_signal == 0) {
@@ -942,7 +952,7 @@ static enum reassign_result_type do_slabs_reassign(int src, int dst) {
     slab_rebal.d_clsid = dst;
 
     slab_rebalance_signal = 1;
-    pthread_cond_signal(&slab_rebalance_cond);
+    pthread_cond_signal(&slab_rebalance_cond);  //启动内存页重新分配
 
     return REASSIGN_OK;
 }

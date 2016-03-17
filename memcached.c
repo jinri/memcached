@@ -669,9 +669,7 @@ static const char *state_text(enum conn_states state) {
 }
 
 /*
- * Sets a connection's current state in the state machine. Any special
- * processing that needs to happen on certain state transitions can
- * happen here.
+ * 设置文件描述符所处状态
  */
 static void conn_set_state(conn *c, enum conn_states state) {
     assert(c != NULL);
@@ -2447,6 +2445,8 @@ typedef struct token_s {
  *      command  = tokens[ix].value;
  *   }
  */
+
+/* 拆分命令 */
 static size_t tokenize_command(char *command, token_t *tokens, const size_t max_tokens) {
     char *s, *e;
     size_t ntokens = 0;
@@ -3004,8 +3004,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                 c->thread->stats.slab_stats[ITEM_clsid(it)].get_hits++;
                 c->thread->stats.get_cmds++;
                 pthread_mutex_unlock(&c->thread->stats.mutex);
-                item_update(it);
-                *(c->ilist + i) = it;
+                item_update(it);   //刷新这个item的访问时间以及在LRU队列中的位置
+                //并不会马上放弃对这个item的占用。因为在add_iov函数中，memcached并不为  
+                //复制一份item，而是直接使用item结构体本身的数据。故不能马上解除对  
+                //item的引用，不然其他worker线程就有机会把这个item释放,导致野指针  
+                *(c->ilist + i) = it;  //把这个item放到ilist数组中，日后会进行释放的
                 i++;
 
             } else {
@@ -3020,8 +3023,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
         }
 
         /*
-         * If the command string hasn't been fully processed, get the next set
-         * of tokens.
+         * get命令的键值key个数可以有很多个，所以此时就会出现后面的键值
          */
         if(key_token->value != NULL) {
             ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
@@ -3050,7 +3052,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
         out_of_memory(c, "SERVER_ERROR out of memory writing get response");
     }
     else {
-        conn_set_state(c, conn_mwrite);
+        conn_set_state(c, conn_mwrite);  //更改conn的状态
         c->msgcurr = 0;
     }
 }
@@ -3677,7 +3679,7 @@ static void process_command(conn *c, char *command) {
 }
 
 /*
- * if we have a complete line in the buffer, process it.
+ * 如果读取到一个完整的命令，处理它。
  */
 static int try_read_command(conn *c) {
     assert(c != NULL);
@@ -3800,7 +3802,7 @@ static int try_read_command(conn *c) {
         assert(cont <= (c->rcurr + c->rbytes));
 
         c->last_cmd_time = current_time;
-        process_command(c, c->rcurr);
+        process_command(c, c->rcurr);  //处理读到的命令
 
         c->rbytes -= (cont - c->rcurr);
         c->rcurr = cont;
@@ -4121,6 +4123,7 @@ static void drive_machine(conn *c) {
                                      DATA_BUFFER_SIZE, tcp_transport);
             }
 
+            //居然stop循环，不过没关系，因为event的可读事件是水平触发的。
             stop = true;
             break;
 
@@ -4137,8 +4140,10 @@ static void drive_machine(conn *c) {
             break;
 
         case conn_read:
+			//读取数据
             res = IS_UDP(c->transport) ? try_read_udp(c) : try_read_network(c);
 
+            //设置描述符状态，再次循环。
             switch (res) {
             case READ_NO_DATA_RECEIVED:
                 conn_set_state(c, conn_waiting);
@@ -5176,7 +5181,7 @@ int main (int argc, char **argv) {
     /* init settings */
     settings_init();
 
-    /* Run regardless of initializing it later */
+    /* 初始化LRU线程相关变量 */
     init_lru_crawler();
     init_lru_maintainer();
 
@@ -5545,6 +5550,7 @@ int main (int argc, char **argv) {
         exit(EX_USAGE);
     }
 
+    //选择哈希函数
     if (hash_init(hash_type) != 0) {
         fprintf(stderr, "Failed to initialize hash_algorithm!\n");
         exit(EX_USAGE);
@@ -5691,6 +5697,7 @@ int main (int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    //启动LRU爬虫线程
     if (start_lru_crawler && start_item_crawler_thread() != 0) {
         fprintf(stderr, "Failed to enable LRU crawler thread\n");
         exit(EXIT_FAILURE);
@@ -5701,6 +5708,7 @@ int main (int argc, char **argv) {
         return 1;
     }
 
+    //启动rebalance线程
     if (settings.slab_reassign &&
         start_slab_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);

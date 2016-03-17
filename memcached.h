@@ -331,12 +331,17 @@ struct settings {
     bool maxconns_fast;     /* Whether or not to early close connections */
     bool lru_crawler;        /* Whether or not to enable the autocrawler thread */
     bool lru_maintainer_thread; /* LRU maintainer background thread */
-    bool slab_reassign;     /* Whether or not slab reassignment is allowed */
-    int slab_automove;     /* Whether or not to automatically move slabs */
+    bool slab_reassign;     /* 用于调节不同类型的item所占的内存。不同类型是指大小不同。某一类item已经很少使用了，但仍占用着内存。可以通过开启slab_reassign调度内存，减少这一类item的内存。 */
+    int slab_automove;     /* 依赖于slab_reassign。用于主动检测是否需要进行内存调度。该选项的参数是可选的。参数的取值范围只能为0、1、2。参数2是不建议的。 */
     int hashpower_init;     /* 哈希表大小，通过HASHPOWER_INIT指定 */
     bool shutdown_command; /* allow shutdown command */
+	//用于修复item的引用数。如果一个worker线程引用了某个item，还没来得及解除引用这个线程就挂了  
+    //那么这个item就永远被这个已死的线程所引用而不能释放。memcached用这个值来检测是否出现这种  
+    //情况。因为这种情况很少发生，所以该变量的默认值为0(即不进行检测)。  
+    //在启动memcached时，通过-o tail_repair_time xxx设置。设置的值要大于10(单位为秒)  
+    //TAIL_REPAIR_TIME_DEFAULT 等于 0。  
     int tail_repair_time;   /* LRU tail refcount leak repair time */
-    bool flush_enabled;     /* flush_all enabled */
+    bool flush_enabled;     /* //是否运行客户端使用flush_all命令 */
     char *hash_algorithm;     /* Hash algorithm in use */
     int lru_crawler_sleep;  /* Microsecond sleep between items */
     uint32_t lru_crawler_tocrawl; /* Number of items to crawl per run */
@@ -437,9 +442,9 @@ struct conn {
     short  ev_flags;
     short  which;   /** 事件 */
 
-    char   *rbuf;   /** buffer to read commands into */
+    char   *rbuf;   /** //读缓冲区 */
     char   *rcurr;  /** but if we parsed some already, this is where we stopped */
-    int    rsize;   /** total allocated size of rbuf */
+    int    rsize;   /* 读缓冲区的总长度 */
     int    rbytes;  /** how much data, starting from rcur, do we have unparsed */
 
     char   *wbuf;
@@ -471,6 +476,7 @@ struct conn {
     int    iovsize;   /* number of elements allocated in iov[] */
     int    iovused;   /* number of elements used in iov[] */
 
+    //指向要回复的数据
     struct msghdr *msglist;
     int    msgsize;   /* number of elements allocated in msglist[] */
     int    msgused;   /* number of elements used in msglist[] */
@@ -526,16 +532,18 @@ extern volatile rel_time_t current_time;
 extern volatile int slab_rebalance_signal;
 
 struct slab_rebalance {
+	//记录要移动的页的信息。slab_start指向页的开始位置。slab_end指向页  
+    //的结束位置。slab_pos则记录当前处理的位置(item)  
     void *slab_start;
     void *slab_end;
     void *slab_pos;
-    int s_clsid;
-    int d_clsid;
-    uint32_t busy_items;
+    int s_clsid;  //源slab class的下标索引
+    int d_clsid;  //目标slab class的下标索引
+    uint32_t busy_items;  //是否worker线程在引用某个item
     uint32_t rescues;
     uint32_t evictions_nomem;
     uint32_t inline_reclaim;
-    uint8_t done;
+    uint8_t done;  //是否完成了内存页移动
 };
 
 extern struct slab_rebalance slab_rebal;

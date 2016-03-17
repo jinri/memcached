@@ -21,5 +21,5 @@ volatile rel_time_t current_time;
 /** exported globals **/
 struct stats stats;
 struct settings settings;
-struct slab_rebalance slab_rebal;
+struct slab_rebalance slab_rebal;  //记录内存页重新分配信息
 volatile int slab_rebalance_signal;
