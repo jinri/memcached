@@ -472,21 +472,30 @@ struct conn {
     int    sbytes;    /* how many bytes to swallow */
 
     /* data for the mwrite state */
+	//ensure_iov_space函数会扩大数组长度.下面的msglist数组所使用到的  
+    //iovec结构体数组就是iov指针所指向的。所以当调用ensure_iov_space  
+    //分配新的iovec数组后，需要重新调整msglist数组元素的值。这个调整  
+    //也是在ensure_iov_space函数里面完成的  
     struct iovec *iov;
     int    iovsize;   /* number of elements allocated in iov[] */
     int    iovused;   /* number of elements used in iov[] */
 
-    //指向要回复的数据
+    //因为msghdr结构体里面的iovec结构体数组长度是有限制的。所以为了能  
+    //传输更多的数据，只能增加msghdr结构体的个数.add_msghdr函数负责增加  
     struct msghdr *msglist;
     int    msgsize;   /* number of elements allocated in msglist[] */
     int    msgused;   /* number of elements used in msglist[] */
+	//正在用sendmsg函数传输msghdr数组中的哪一个元素
     int    msgcurr;   /* element in msglist[] being transmitted now */
+	//msgcurr指向的msghdr总共有多少个字节  
     int    msgbytes;  /* number of bytes in current msg */
 
+    //worker线程需要占有这个item，直至把item的数据都写回给客户端了  
+    //故需要一个item指针数组记录本conn占有的item 
     item   **ilist;   /* list of items to write out */
-    int    isize;
-    item   **icurr;
-    int    ileft;
+    int    isize;  //数组的大小
+    item   **icurr;  //当前使用到的item(在释放占用item时会用到)
+    int    ileft;  //ilist数组中有多少个item需要释放
 
     char   **suffixlist;
     int    suffixsize;

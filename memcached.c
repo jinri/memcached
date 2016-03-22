@@ -231,6 +231,8 @@ static void settings_init(void) {
     settings.num_threads_per_udp = 0;
     settings.prefix_delimiter = ':';
     settings.detail_enabled = 0;
+	//worker线程连续为某个客户端执行命令的最大命令数。这主要是为了防止一个客户端霸占整个worker线程  
+    //，而该worker线程的其他客户端的命令无法得到处理 
     settings.reqs_per_event = 20;
     settings.backlog = 1024;
     settings.binding_protocol = negotiating_prot;
@@ -599,6 +601,7 @@ static void conn_close(conn *c) {
  *
  * This should only be called in between requests since it can wipe output
  * buffers!
+ * //收缩连接缓冲区大小
  */
 static void conn_shrink(conn *c) {
     assert(c != NULL);
@@ -606,6 +609,8 @@ static void conn_shrink(conn *c) {
     if (IS_UDP(c->transport))
         return;
 
+    //c->rbytes指明了当前读缓冲区有效数据的长度。当其小于DATA_BUFFER_SIZE  
+    //才进行读缓冲区收缩，所以不会导致客户端命令数据的丢失。
     if (c->rsize > READ_BUFFER_HIGHWAT && c->rbytes < DATA_BUFFER_SIZE) {
         char *newbuf;
 
@@ -2270,15 +2275,15 @@ static void complete_nread_binary(conn *c) {
 static void reset_cmd_handler(conn *c) {
     c->cmd = -1;
     c->substate = bin_no_state;
-    if(c->item != NULL) {
+    if(c->item != NULL) {  //conn_new_cmd状态下，item为NULL 
         item_remove(c->item);
         c->item = NULL;
     }
     conn_shrink(c);
     if (c->rbytes > 0) {
-        conn_set_state(c, conn_parse_cmd);
+        conn_set_state(c, conn_parse_cmd);  //读缓冲区里面有数据，接着去解析读到的数据
     } else {
-        conn_set_state(c, conn_waiting);
+        conn_set_state(c, conn_waiting);  //否则等待数据的到来
     }
 }
 
@@ -3058,19 +3063,22 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 }
 
 static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
-    char *key;
-    size_t nkey;
-    unsigned int flags;
+    char *key;  //键值
+    size_t nkey;  //键值长度
+    unsigned int flags;  //item的flags
     int32_t exptime_int = 0;
-    time_t exptime;
-    int vlen;
+    time_t exptime;  //item的超时
+    int vlen;  //item数据域的长度
     uint64_t req_cas_id=0;
     item *it;
 
     assert(c != NULL);
 
+    //服务器不需要回复信息给客户端，这可以减少网络IO进而提高速度  
+    //这种设置是一次性的，不影响下一条命令  
     set_noreply_maybe(c, tokens, ntokens);
 
+    //键值的长度太长了。KEY_MAX_LENGTH为250
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
@@ -3079,6 +3087,8 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     key = tokens[KEY_TOKEN].value;
     nkey = tokens[KEY_TOKEN].length;
 
+    //将字符串转成unsigned long,获取flags、exptime_int、vlen。  
+    //它们的字符串形式必须是纯数字，否则转换失败,返回false  
     if (! (safe_strtoul(tokens[2].value, (uint32_t *)&flags)
            && safe_strtol(tokens[3].value, &exptime_int)
            && safe_strtol(tokens[4].value, (int32_t *)&vlen))) {
@@ -3469,6 +3479,7 @@ static void process_command(conn *c, char *command) {
                 (strcmp(tokens[COMMAND_TOKEN].value, "prepend") == 0 && (comm = NREAD_PREPEND)) ||
                 (strcmp(tokens[COMMAND_TOKEN].value, "append") == 0 && (comm = NREAD_APPEND)) )) {
 
+        //处理更新类命令
         process_update_command(c, tokens, ntokens, comm, false);
 
     } else if ((ntokens == 7 || ntokens == 8) && (strcmp(tokens[COMMAND_TOKEN].value, "cas") == 0 && (comm = NREAD_CAS))) {
@@ -3686,7 +3697,15 @@ static int try_read_command(conn *c) {
     assert(c->rcurr <= (c->rbuf + c->rsize));
     assert(c->rbytes > 0);
 
+	//memcached支持文本和二进制两种协议。对于TCP这样的有连接协议,memcached为该	
+	//fd分配conn的时候，并不指明其是用哪种协议的。此时用negotiating_prot代表待	
+	//协商的意思(negotiate是谈判、协商)。而是在客户端第一次发送数据给  
+	//memcached的时候用第一个字节来指明.之后的通信都是使用指明的这种协议。	
+	//对于UDP这样的无连接协议，指明每次都指明使用哪种协议了  
+
     if (c->protocol == negotiating_prot || c->transport == udp_transport)  {
+		//对于TCP只会进入该判断体里面一次，而UDP就要次次都进入了
+		//PROTOCOL_BINARY_REQ为0x80，即128。对于ascii的文本来说，是不会取这个值的
         if ((unsigned char)c->rbuf[0] == (unsigned char)PROTOCOL_BINARY_REQ) {
             c->protocol = binary_prot;
         } else {
@@ -3699,7 +3718,7 @@ static int try_read_command(conn *c) {
         }
     }
 
-    if (c->protocol == binary_prot) {
+    if (c->protocol == binary_prot) {  //二进制协议
         /* Do we have the complete packet header? */
         if (c->rbytes < sizeof(c->binary_header)) {
             /* need more data! */
@@ -3765,15 +3784,15 @@ static int try_read_command(conn *c) {
             c->rbytes -= sizeof(c->binary_header);
             c->rcurr += sizeof(c->binary_header);
         }
-    } else {
+    } else {  //文本协议  
         char *el, *cont;
 
-        if (c->rbytes == 0)
+        if (c->rbytes == 0)  //读缓冲区里面没有数据
             return 0;
 
         el = memchr(c->rcurr, '\n', c->rbytes);
-        if (!el) {
-            if (c->rbytes > 1024) {
+        if (!el) {  //没有找到\n，说明没有读取到一条完整的命令
+            if (c->rbytes > 1024) {  //接收了1024个字符都没有回车符，值得怀疑
                 /*
                  * We didn't have a '\n' in the first k. This _has_ to be a
                  * large multiget, if not we should just nuke the connection.
@@ -3783,15 +3802,15 @@ static int try_read_command(conn *c) {
                     ++ptr;
                 }
 
-                if (ptr - c->rcurr > 100 ||
-                    (strncmp(ptr, "get ", 4) && strncmp(ptr, "gets ", 5))) {
+                if (ptr - c->rcurr > 100 ||  //太多的空格符
+                    (strncmp(ptr, "get ", 4) && strncmp(ptr, "gets ", 5))) {  //是get或者gets命令，但一次获取太多信息了
 
-                    conn_set_state(c, conn_closing);
+                    conn_set_state(c, conn_closing);  //必须干掉这种扯蛋的conn客户端
                     return 1;
                 }
             }
 
-            return 0;
+            return 0;  //返回0表示需要继续读取socket的数据才能解析命令
         }
         cont = el + 1;
         if ((el - c->rcurr) > 1 && *(el - 1) == '\r') {
@@ -3804,13 +3823,15 @@ static int try_read_command(conn *c) {
         c->last_cmd_time = current_time;
         process_command(c, c->rcurr);  //处理读到的命令
 
+        //cont指明下一条命令的开始位置  
+        //更新curr指针和剩余字节数  
         c->rbytes -= (cont - c->rcurr);
         c->rcurr = cont;
 
         assert(c->rcurr <= (c->rbuf + c->rsize));
     }
 
-    return 1;
+    return 1;  //返回1表示正在处理读取的一条命令
 }
 
 /*
@@ -3870,13 +3891,18 @@ static enum try_read_result try_read_network(conn *c) {
     assert(c != NULL);
 
     if (c->rcurr != c->rbuf) {
+		//rcurr 和 rbuf之间是一条已经解析了的命令。现在可以丢弃了
         if (c->rbytes != 0) /* otherwise there's nothing to copy */
             memmove(c->rbuf, c->rcurr, c->rbytes);
         c->rcurr = c->rbuf;
     }
 
     while (1) {
+		//因为本函数会尽可能把socket数据都读取到rbuf指向的缓冲区里面，  
+        //所以可能出现当前缓冲区不够大的情况(即rbytes>=rsize)  
         if (c->rbytes >= c->rsize) {
+			//可能有坏蛋发无穷无尽的数据过来，而本函数又是尽可能把所有数据都  
+            //读进缓冲区。为了防止坏蛋耗光服务器的内存，所以就只分配4次内存  
             if (num_allocs == 4) {
                 return gotdata;
             }
@@ -3902,14 +3928,14 @@ static enum try_read_result try_read_network(conn *c) {
         res = read(c->sfd, c->rbuf + c->rbytes, avail);
         if (res > 0) {
             pthread_mutex_lock(&c->thread->stats.mutex);
-            c->thread->stats.bytes_read += res;
+            c->thread->stats.bytes_read += res;  //记录该线程读取了多少字节
             pthread_mutex_unlock(&c->thread->stats.mutex);
             gotdata = READ_DATA_RECEIVED;
             c->rbytes += res;
-            if (res == avail) {
+            if (res == avail) {  //可能还有数据没有读出来
                 continue;
             } else {
-                break;
+                break;  //socket暂时还没数据了(即已经读取完)
             }
         }
         if (res == 0) {
@@ -4161,6 +4187,12 @@ static void drive_machine(conn *c) {
             break;
 
         case conn_parse_cmd :
+			//返回1表示正在处理读取的一条命令  
+            //返回0表示需要继续读取socket的数据才能解析命令  
+            //如果读取到了一条完整的命令，那么函数内部会去解析，  
+            //并进行调用process_command函数进行一些处理.  
+            //像set、add、replace这些命令，会在处理的时候调用  
+            //conn_set_state(c, conn_nread)  
             if (try_read_command(c) == 0) {
                 /* wee need more data! */
                 conn_set_state(c, conn_waiting);
@@ -4169,8 +4201,7 @@ static void drive_machine(conn *c) {
             break;
 
         case conn_new_cmd:
-            /* Only process nreqs at a time to avoid starving other
-               connections */
+            /* 同一个连接每次最多处理nreqs次命令，以免其他连接饿死 */
 
             --nreqs;
             if (nreqs >= 0) {
@@ -4180,11 +4211,8 @@ static void drive_machine(conn *c) {
                 c->thread->stats.conn_yields++;
                 pthread_mutex_unlock(&c->thread->stats.mutex);
                 if (c->rbytes > 0) {
-                    /* We have already read in data into the input buffer,
-                       so libevent will most likely not signal read events
-                       on the socket (unless more data is available. As a
-                       hack we should just put in a request to write data,
-                       because that should be possible ;-)
+                    /* 已达到每次最大命令处理数目，如果此时还存在未处理的数据，
+                     * 打开写事件。
                     */
                     if (!update_event(c, EV_WRITE | EV_PERSIST)) {
                         if (settings.verbose > 0)
