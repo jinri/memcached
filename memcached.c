@@ -830,12 +830,13 @@ static int build_udp_headers(conn *c) {
 }
 
 
+//回复客户端
 static void out_string(conn *c, const char *str) {
     size_t len;
 
     assert(c != NULL);
 
-    if (c->noreply) {
+    if (c->noreply) {  //不需要回复信息给客户端
         if (settings.verbose > 1)
             fprintf(stderr, ">%d NOREPLY %s\n", c->sfd, str);
         c->noreply = false;
@@ -895,6 +896,9 @@ static void out_of_memory(conn *c, char *ascii_error) {
 static void complete_nread_ascii(conn *c) {
     assert(c != NULL);
 
+
+    //此时这个item不在LRU队列，也不在哈希表中  
+    //并且引用数等于1(就是本worker线程在引用它)
     item *it = c->item;
     int comm = c->cmd;
     enum store_item_type ret;
@@ -903,6 +907,7 @@ static void complete_nread_ascii(conn *c) {
     c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
     pthread_mutex_unlock(&c->thread->stats.mutex);
 
+    //保证最后的两个字符是"\r\n"，否则就是错误数据 
     if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
@@ -957,6 +962,7 @@ static void complete_nread_ascii(conn *c) {
 
     }
 
+    //本worker线程取消对这个item的引用
     item_remove(c->item);       /* release the c->item reference */
     c->item = 0;
 }
@@ -2292,9 +2298,9 @@ static void complete_nread(conn *c) {
     assert(c->protocol == ascii_prot
            || c->protocol == binary_prot);
 
-    if (c->protocol == ascii_prot) {
+    if (c->protocol == ascii_prot) {  //文本协议
         complete_nread_ascii(c);
-    } else if (c->protocol == binary_prot) {
+    } else if (c->protocol == binary_prot) {  //二进制协议
         complete_nread_binary(c);
     }
 }
@@ -2304,6 +2310,9 @@ static void complete_nread(conn *c) {
  * commands. In threaded mode, this is protected by the cache lock.
  *
  * Returns the state of storage.
+ //主调函数store_item会加item_lock(hv)锁  
+ //set、add、replace命令最终都会调用本函数进行存储的  
+ //comm参数保存了具体是哪个命令  
  */
 enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t hv) {
     char *key = ITEM_key(it);
@@ -2315,6 +2324,8 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
 
     if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
+		//因为已经有相同键值的旧item了，所以add命令使用失败。但  
+        //还是会刷新旧item的访问时间以及LRU队列中的位置  
         do_item_update(old_it);
     } else if (!old_it && (comm == NREAD_REPLACE
         || comm == NREAD_APPEND || comm == NREAD_PREPEND))
@@ -2373,6 +2384,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
 
                 flags = (int) strtol(ITEM_suffix(old_it), (char **) NULL, 10);
 
+                //因为是追加数据，先前分配的item可能不够大，所以要重新申请item 
                 new_it = do_item_alloc(key, it->nkey, flags, old_it->exptime, it->nbytes + old_it->nbytes - 2 /* CRLF */, hv);
 
                 if (new_it == NULL) {
@@ -2398,11 +2410,14 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             }
         }
 
-        if (stored == NOT_STORED) {
+        //add、set、replace命令还没处理,但之前已经处理了不合理的情况  
+        //即add命令已经确保了目前哈希表还没存储对应键值的item，replace命令  
+        //已经保证哈希表已经存储了对应键值的item  
+        if (stored == NOT_STORED) {  //replace和set命令会进入这里
             if (old_it != NULL)
-                item_replace(old_it, it, hv);
-            else
-                do_item_link(it, hv);
+                item_replace(old_it, it, hv);  //删除旧item，插入新item
+            else  //add和set命令会进入这里
+                do_item_link(it, hv);  //对于一个没有存在的key，使用set命令会来到这里
 
             c->cas = ITEM_get_cas(it);
 
@@ -3078,7 +3093,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     //这种设置是一次性的，不影响下一条命令  
     set_noreply_maybe(c, tokens, ntokens);
 
-    //键值的长度太长了。KEY_MAX_LENGTH为250
+    //键值的长度太长了。
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
@@ -3113,6 +3128,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         }
     }
 
+    //在存储item数据的时候，都会自动在数据的最后加上"\r\n" 
     vlen += 2;
     if (vlen < 0 || vlen - 2 < 0) {
         out_string(c, "CLIENT_ERROR bad command line format");
@@ -3123,6 +3139,10 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         stats_prefix_record_set(key, nkey);
     }
 
+    //根据所需的大小分配对应的item,并给这个item赋值。  
+    //除了time和refcount成员外，其他的都赋值了。并把键值、flag这些值都拷贝  
+    //到item后面的buff里面了，至于data，因为现在都还没拿到所以还没赋值  
+    //realtime(exptime)是直接赋值给item的exptime成员  
     it = item_alloc(key, nkey, flags, realtime(exptime), vlen);
 
     if (it == 0) {
@@ -3148,11 +3168,17 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     }
     ITEM_set_cas(it, req_cas_id);
 
+    //本函数并不会把item插入到哈希表和LRU队列，这个插入工作由  
+    //complete_nread_ascii函数完成。  
     c->item = it;
-    c->ritem = ITEM_data(it);
-    c->rlbytes = it->nbytes;
+    c->ritem = ITEM_data(it);  //数据直通车 
+    c->rlbytes = it->nbytes;  //等于vlen(要比用户输入的长度大2，因为要加上\r\n)
     c->cmd = comm;
-    conn_set_state(c, conn_nread);
+	//process_update_command函数申请分配一个item后，并没有直接直接把这个item插入到LRU队列和哈希表中，
+	//而仅仅是用conn结构体的item成员指向这个申请得到的item，
+	//并且用ritem成员指向item结构体的数据域(这为了方便写入数据)。
+	//最后conn的状态修改为conn_nread，就这样process_update_command函数曳然而止了。
+    conn_set_state(c, conn_nread);  //在状态机中填充item数据
 }
 
 static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens) {
@@ -4226,8 +4252,20 @@ static void drive_machine(conn *c) {
             break;
 
         case conn_nread:
+			//对于set、add、replace这样的命令会将state设置成conn_nread  
+            //因为在conn_read，它只读取了一行的数据，就去解析。但数据是  
+            //在第二行输入的(客户端输入进行操作的时候)，此时，rlbytes  
+            //等于data的长度。本case里面会从conn的读缓冲区、socket读缓冲区  
+            //读取数据到item里面。  
+              
+            //rlbytes标识还有多少字节需要读取到item里面。只要没有读取足够的  
+            //数据，conn的状态都是保持为conn_nread。即使读取到足够的数据  
+            //状态还是不变，但此时rlbytes等于0。此刻会进入下面的这个if里面  
             if (c->rlbytes == 0) {
-                complete_nread(c);
+				 //处理完成后会调用out_string函数。如果用户明确要求不需要回复  
+                //那么conn的状态变成conn_new_cmd。如果需要回复，那么状态改为  
+                //conn_write，并且write_and_go成员赋值为conn_new_cmd  
+                complete_nread(c);  //完成对一个item的操作
                 break;
             }
 
@@ -4241,7 +4279,8 @@ static void drive_machine(conn *c) {
             }
 
             /* first check if we have leftovers in the conn_read buffer */
-            if (c->rbytes > 0) {
+            if (c->rbytes > 0) {  //conn读缓冲区里面还有数据,那么把数据直接赋值到item里面
+                //rlbytes是需要读取的字节数, rbytes是读缓冲区拥有的字节数
                 int tocopy = c->rbytes > c->rlbytes ? c->rlbytes : c->rbytes;
                 if (c->ritem != c->rcurr) {
                     memmove(c->ritem, c->rcurr, tocopy);
@@ -4250,12 +4289,14 @@ static void drive_machine(conn *c) {
                 c->rlbytes -= tocopy;
                 c->rcurr += tocopy;
                 c->rbytes -= tocopy;
-                if (c->rlbytes == 0) {
+                if (c->rlbytes == 0) {  //conn读缓冲区的数据能满足item的所需数据,无需从socket中读取
                     break;
                 }
             }
 
             /*  now try reading from the socket */
+			//下面的代码中，只要不发生socket错误，那么无论是否读取到足够的数据  
+            //都不会改变conn的状态，也就是说，下一次进入状态机还是为conn_nread状态  
             res = read(c->sfd, c->ritem, c->rlbytes);
             if (res > 0) {
                 pthread_mutex_lock(&c->thread->stats.mutex);
@@ -4330,7 +4371,7 @@ static void drive_machine(conn *c) {
                     conn_set_state(c, conn_closing);
                     break;
                 }
-                stop = true;
+                stop = true;  //此时就不要再读了，停止状态机，等待libevent通知有数据可读
                 break;
             }
             /* otherwise we have a real error, on which we close the connection */
