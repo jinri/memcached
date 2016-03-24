@@ -440,12 +440,12 @@ struct conn {
     rel_time_t last_cmd_time;
     struct event event;
     short  ev_flags;
-    short  which;   /** 事件 */
+    short  which;   /* 事件 */
 
-    char   *rbuf;   /** //读缓冲区 */
-    char   *rcurr;  /** but if we parsed some already, this is where we stopped */
+    char   *rbuf;   /* 读缓冲区 */
+    char   *rcurr;  /* 指向读缓冲区中未解析的数据 */
     int    rsize;   /* 读缓冲区的总长度 */
-    int    rbytes;  /** how much data, starting from rcur, do we have unparsed */
+    int    rbytes;  /* how much data, starting from rcur, do we have unparsed */
 
     char   *wbuf;
     char   *wcurr;

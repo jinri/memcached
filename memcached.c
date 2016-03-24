@@ -2437,6 +2437,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
     return stored;
 }
 
+//存储解析的命令
 typedef struct token_s {
     char *value;
     size_t length;
@@ -3093,7 +3094,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     //这种设置是一次性的，不影响下一条命令  
     set_noreply_maybe(c, tokens, ntokens);
 
-    //键值的长度太长了。
+    //键太长了。
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
@@ -3491,6 +3492,7 @@ static void process_command(conn *c, char *command) {
         return;
     }
 
+    //拆分收到的命令行
     ntokens = tokenize_command(command, tokens, MAX_TOKENS);
     if (ntokens >= 3 &&
         ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
@@ -3818,20 +3820,18 @@ static int try_read_command(conn *c) {
 
         el = memchr(c->rcurr, '\n', c->rbytes);
         if (!el) {  //没有找到\n，说明没有读取到一条完整的命令
-            if (c->rbytes > 1024) {  //接收了1024个字符都没有回车符，值得怀疑
-                /*
-                 * We didn't have a '\n' in the first k. This _has_ to be a
-                 * large multiget, if not we should just nuke the connection.
-                 */
+            if (c->rbytes > 1024) {
+				//计算开始空白数目
                 char *ptr = c->rcurr;
                 while (*ptr == ' ') { /* ignore leading whitespaces */
                     ++ptr;
                 }
 
-                if (ptr - c->rcurr > 100 ||  //太多的空格符
-                    (strncmp(ptr, "get ", 4) && strncmp(ptr, "gets ", 5))) {  //是get或者gets命令，但一次获取太多信息了
+                //空白字符太多或者不是get与gets命令，关闭客户端
+                if (ptr - c->rcurr > 100 ||
+                    (strncmp(ptr, "get ", 4) && strncmp(ptr, "gets ", 5))) {
 
-                    conn_set_state(c, conn_closing);  //必须干掉这种扯蛋的conn客户端
+                    conn_set_state(c, conn_closing);
                     return 1;
                 }
             }
