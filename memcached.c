@@ -911,7 +911,7 @@ static void complete_nread_ascii(conn *c) {
     if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) {
         out_string(c, "CLIENT_ERROR bad data chunk");
     } else {
-      ret = store_item(it, comm, c);
+      ret = store_item(it, comm, c);  //将这个item存放到LRU对和哈希表中
 
 #ifdef ENABLE_DTRACE
       uint64_t cas = ITEM_get_cas(it);
@@ -4262,7 +4262,7 @@ static void drive_machine(conn *c) {
             //数据，conn的状态都是保持为conn_nread。即使读取到足够的数据  
             //状态还是不变，但此时rlbytes等于0。此刻会进入下面的这个if里面  
             if (c->rlbytes == 0) {
-				 //处理完成后会调用out_string函数。如果用户明确要求不需要回复  
+				//处理完成后会调用out_string函数。如果用户明确要求不需要回复  
                 //那么conn的状态变成conn_new_cmd。如果需要回复，那么状态改为  
                 //conn_write，并且write_and_go成员赋值为conn_new_cmd  
                 complete_nread(c);  //完成对一个item的操作
