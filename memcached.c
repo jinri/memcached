@@ -4103,6 +4103,7 @@ static enum transmit_result transmit(conn *c) {
 
 //处理所有fd事件
 static void drive_machine(conn *c) {
+	printf("in drive_machine, state:%d\n", c->state);
     bool stop = false;
     int sfd;
     socklen_t addrlen;
