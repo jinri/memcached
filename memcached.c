@@ -12,7 +12,6 @@
  *  Authors:
  *      Anatoly Vorobey <mellon@pobox.com>
  *      Brad Fitzpatrick <brad@danga.com>
- ≤‚ ‘
  */
 #include "memcached.h"
 #include <sys/stat.h>
