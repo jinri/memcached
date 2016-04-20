@@ -2280,7 +2280,8 @@ static void complete_nread_binary(conn *c) {
 static void reset_cmd_handler(conn *c) {
     c->cmd = -1;
     c->substate = bin_no_state;
-    if(c->item != NULL) {  //conn_new_cmd状态下，item为NULL 
+    //客户端发来多个命令，在开始处理下个命令前，重置客户端状态。
+    if(c->item != NULL) {
         item_remove(c->item);
         c->item = NULL;
     }
@@ -3078,6 +3079,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 }
 
 static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
+    int i;
+    for (i = 0; i < ntokens; ++i) {
+        printf("%d:%s", i, tokens[i].value);
+    }
+
     char *key;  //键值
     size_t nkey;  //键值长度
     unsigned int flags;  //item的flags
@@ -3493,6 +3499,7 @@ static void process_command(conn *c, char *command) {
 
     //拆分收到的命令行
     ntokens = tokenize_command(command, tokens, MAX_TOKENS);
+    printf("command:%s\n", tokens[COMMAND_TOKEN].value);
     if (ntokens >= 3 &&
         ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
@@ -3812,6 +3819,7 @@ static int try_read_command(conn *c) {
             c->rcurr += sizeof(c->binary_header);
         }
     } else {  //文本协议  
+        printf("text protocol\n");
         char *el, *cont;
 
         if (c->rbytes == 0)  //读缓冲区里面没有数据
@@ -4102,7 +4110,6 @@ static enum transmit_result transmit(conn *c) {
 
 //处理所有fd事件
 static void drive_machine(conn *c) {
-	printf("in drive_machine, state:%d\n", c->state);
     bool stop = false;
     int sfd;
     socklen_t addrlen;
@@ -4119,7 +4126,7 @@ static void drive_machine(conn *c) {
     assert(c != NULL);
 
     while (!stop) {
-
+        printf("fd:%d, status:%d\n", c->sfd, c->state);
         switch(c->state) {
         case conn_listening:
             addrlen = sizeof(addr);
@@ -4198,13 +4205,13 @@ static void drive_machine(conn *c) {
             //设置描述符状态，再次循环。
             switch (res) {
             case READ_NO_DATA_RECEIVED:
-                conn_set_state(c, conn_waiting);
+                conn_set_state(c, conn_waiting);  //等待更多数据到达
                 break;
             case READ_DATA_RECEIVED:
-                conn_set_state(c, conn_parse_cmd);
+                conn_set_state(c, conn_parse_cmd);  //解析命令
                 break;
             case READ_ERROR:
-                conn_set_state(c, conn_closing);
+                conn_set_state(c, conn_closing);  //错误
                 break;
             case READ_MEMORY_ERROR: /* Failed to allocate more memory */
                 /* State already set by try_read_network */
@@ -4223,6 +4230,8 @@ static void drive_machine(conn *c) {
                 /* wee need more data! */
                 conn_set_state(c, conn_waiting);
             }
+
+            printf("fd:%d, after conn_parse_cmd. status:%d\n", c->sfd, c->state);
 
             break;
 

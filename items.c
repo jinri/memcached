@@ -175,6 +175,7 @@ item *do_item_alloc(char *key, const size_t nkey, const int flags,
 	//要存储这个item需要的总空间。要注意第一个参数是nkey+1，所以上面的那些宏计算时  
     //使用了(item)->nkey + 1 
     size_t ntotal = item_make_header(nkey + 1, flags, nbytes, suffix, &nsuffix);
+    printf("ntotal:%d\n", ntotal);
     if (settings.use_cas) {
         ntotal += sizeof(uint64_t);
     }
